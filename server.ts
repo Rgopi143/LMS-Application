@@ -411,7 +411,7 @@ async function startServer() {
             const isImage = item.mimeType?.startsWith('image/');
             allFiles.push({
               id: item.id,
-              title: item.name,
+              title: item.name.replace(/\.[^/.]+$/, ""),
               category: isImage ? 'Images' : 'PDFs',
               size: sizeInMb,
               type: isImage ? 'image' : 'pdf',
@@ -528,7 +528,7 @@ async function startServer() {
           const downloadUrl = `/uploads/${entry.name}`;
           files.push({
             id: entry.name,
-            title: entry.name.replace(/^\d+-/, ''),
+            title: entry.name.replace(/^\d+-/, '').replace(/\.[^/.]+$/, ""),
             category: isImage ? 'Images' : 'PDFs',
             size: (stats.size / (1024 * 1024)).toFixed(1) + ' MB',
              type: isImage ? 'image' : 'pdf',
