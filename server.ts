@@ -280,9 +280,14 @@ async function startServer() {
       });
     } else if (process.env.GOOGLE_CREDENTIALS) {
       const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+      if (creds.private_key) {
+        creds.private_key = creds.private_key.replace(/\\n/g, '\n');
+      }
       clientEmail = creds.client_email || 'your service account email';
-      auth = google.auth.fromJSON(creds);
-      auth.scopes = ['https://www.googleapis.com/auth/drive'];
+      auth = new google.auth.GoogleAuth({
+        credentials: creds,
+        scopes: ['https://www.googleapis.com/auth/drive']
+      });
     }
   } catch (err) {
     console.error('Failed to initialize Google Auth:', err);
