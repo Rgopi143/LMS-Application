@@ -436,6 +436,51 @@ async function startServer() {
     }
   }
 
+  app.get('/api/test-drive-connection', async (req, res) => {
+    try {
+      const results: any = {
+        driveInitialized: !!drive,
+        clientEmail: clientEmail,
+        targetFolderId: PARENT_FOLDER_ID,
+        folderAccessSuccess: false,
+        error: null,
+        filesFetchedCount: 0
+      };
+
+      if (!drive) {
+        results.error = "Google Drive instance is not initialized. Please verify credentials.json or GOOGLE_CREDENTIALS environment variable.";
+        return res.json(results);
+      }
+
+      try {
+        const folderResponse = await drive.files.get({
+          fileId: PARENT_FOLDER_ID,
+          fields: 'id, name, mimeType',
+          supportsAllDrives: true
+        });
+        results.folderAccessSuccess = true;
+        results.folderInfo = folderResponse.data;
+
+        // Try to list files in root parent folder
+        const listResponse = await drive.files.list({
+          q: `'${PARENT_FOLDER_ID}' in parents and trashed = false`,
+          fields: 'files(id, name, mimeType)',
+          pageSize: 10,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
+        });
+        results.filesFetchedStatus = "success";
+        results.filesFetchedCount = (listResponse.data.files || []).length;
+      } catch (err: any) {
+        results.error = err.message;
+      }
+
+      res.json(results);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get('/api/supabase-files', async (req, res) => {
     try {
       const uploadsDir = path.join(process.cwd(), 'uploads');
