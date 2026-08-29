@@ -188,15 +188,7 @@ export default function LMSDashboard({
   isAdmin = false
 }: LMSDashboardProps) {
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'courses' | 'catalog' | 'progress' | 'schedule' | 'assignments' | 'playground' | 'notes' | 'rating' | 'library'>(() => {
-    const saved = localStorage.getItem('lmsActiveTab');
-    return (saved ? JSON.parse(saved) : 'overview');
-  });
-
-  // Save activeTab to localStorage whenever it changes
-  useEffect(() => {
-    localStorage.setItem('lmsActiveTab', JSON.stringify(activeTab));
-  }, [activeTab]);
+  const [activeTab, setActiveTab] = useState<'overview' | 'courses' | 'catalog' | 'progress' | 'schedule' | 'assignments' | 'playground' | 'notes' | 'rating' | 'library'>('overview');
 
   // Handle desiredTab prop to set active tab
   useEffect(() => {

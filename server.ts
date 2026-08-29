@@ -15,8 +15,10 @@ import crypto from 'crypto';
 
 // Helper to sign JWTs
 function jwtSign(payload: any): string {
+  const exp = payload.exp || (Date.now() + 6 * 60 * 60 * 1000);
+  const jwtPayload = { ...payload, exp };
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const body = Buffer.from(JSON.stringify(jwtPayload)).toString('base64url');
   const secret = 'turso_auth_secret_key_12345';
   const signature = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
   return `${header}.${body}.${signature}`;
@@ -31,7 +33,11 @@ function jwtVerify(token: string): any {
     const secret = 'turso_auth_secret_key_12345';
     const expectedSignature = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
     if (signature !== expectedSignature) return null;
-    return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    const decoded = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (decoded.exp && Date.now() > decoded.exp) {
+      return null;
+    }
+    return decoded;
   } catch (e) {
     return null;
   }

@@ -5,7 +5,27 @@ const authListeners = new Set<(event: string, session: any) => void>();
 let currentSession: any = (() => {
   try {
     const saved = localStorage.getItem('lms_session');
-    return saved ? JSON.parse(saved) : null;
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed?.access_token) {
+        const parts = parsed.access_token.split('.');
+        if (parts.length === 3) {
+          const base64Url = parts[1];
+          const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+          const jsonStr = typeof window !== 'undefined'
+            ? window.atob(base64)
+            : Buffer.from(base64Url, 'base64url').toString('utf8');
+          const payload = JSON.parse(jsonStr);
+          if (payload.exp && Date.now() > payload.exp) {
+            localStorage.removeItem('lms_session');
+            localStorage.removeItem('appAdminSession');
+            return null;
+          }
+        }
+      }
+      return parsed;
+    }
+    return null;
   } catch {
     return null;
   }
