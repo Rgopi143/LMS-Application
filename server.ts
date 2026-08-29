@@ -8,9 +8,53 @@ import dotenv from 'dotenv';
 import multer from 'multer';
 import { google } from 'googleapis';
 import fsSync from 'fs';
-import { createClient } from '@supabase/supabase-js';
-
 dotenv.config();
+
+import { turso, initTursoDatabase, hashPassword } from './src/database/turso';
+import crypto from 'crypto';
+
+// Helper to sign JWTs
+function jwtSign(payload: any): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const secret = 'turso_auth_secret_key_12345';
+  const signature = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
+  return `${header}.${body}.${signature}`;
+}
+
+// Helper to verify JWTs
+function jwtVerify(token: string): any {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [header, body, signature] = parts;
+    const secret = 'turso_auth_secret_key_12345';
+    const expectedSignature = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
+    if (signature !== expectedSignature) return null;
+    return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Convert serialized string arrays/objects back to JS types in SQL results
+function parseJSONFields(obj: any) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const result = { ...obj };
+  for (const key of Object.keys(result)) {
+    if (typeof result[key] === 'string') {
+      const val = result[key].trim();
+      if ((val.startsWith('{') && val.endsWith('}')) || (val.startsWith('[') && val.endsWith(']'))) {
+        try {
+          result[key] = JSON.parse(val);
+        } catch (e) {
+          // Not JSON, leave as is
+        }
+      }
+    }
+  }
+  return result;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,9 +68,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  const supabaseUrl = 'https://uoowvjpeuakuvgenhgyx.supabase.co';
-  const supabaseServiceKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVvb3d2anBldWFrdXZnZW5oZ3l4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTg4NjMxNSwiZXhwIjoyMDk3NDYyMzE1fQ.-DcxjArcaNOl8LLDOqmhg5tYjfsy0zt3DXOcKhLSAX0';
-  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  await initTursoDatabase();
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -305,41 +347,11 @@ async function startServer() {
       });
 
     } catch (error: any) {
-      console.warn('Google Drive Upload Restricted, using Supabase Secret Service Role:', error.message);
-      
+      console.warn('Google Drive Upload Restricted, using local storage fallback:', error.message);
       try {
-        const fileName = `${Date.now()}-${req.file.originalname}`;
-        const fileData = fsSync.readFileSync(req.file.path);
-
-        const isImage = req.file.mimetype.startsWith('image/');
-        const bucketName = isImage ? "Pics" : "PDF's";
-
-        const { data, error: uploadError } = await supabase.storage
-          .from(bucketName)
-          .upload(fileName, fileData, {
-            contentType: req.file.mimetype,
-            upsert: true
-          });
-
-        if (uploadError) throw uploadError;
-
-        const { data: { publicUrl } } = supabase.storage
-          .from(bucketName)
-          .getPublicUrl(fileName);
-        if (fsSync.existsSync(req.file.path)) {
-          fsSync.unlinkSync(req.file.path);
+        if (!req.file) {
+          return res.status(400).json({ error: 'No file provided' });
         }
-
-        res.json({
-          success: true,
-          source: 'supabase',
-          fileName: (req.body.title || req.file.originalname),
-          previewUrl: publicUrl,
-          downloadUrl: publicUrl,
-          message: 'Stored in Supabase Cloud Storage'
-        });
-      } catch (supabaseErr: any) {
-        console.error('Supabase Fallback Error:', supabaseErr.message);
         const localUrl = `/uploads/${req.file.filename}`;
         res.json({
           success: true,
@@ -349,61 +361,46 @@ async function startServer() {
           downloadUrl: localUrl,
           message: 'Stored locally (Cloud storage restricted)'
         });
+      } catch (err: any) {
+        console.error('Local Fallback Error:', err.message);
+        res.status(500).json({ error: err.message });
       }
     }
   });
 
   app.get('/api/supabase-files', async (req, res) => {
     try {
-      async function getAllFiles(bucket: string, folder: string = ''): Promise<any[]> {
-        console.log(`Scanning bucket: ${bucket}, folder: ${folder}`);
-        const { data, error } = await supabase.storage.from(bucket).list(folder, {
-          limit: 100,
-          sortBy: { column: 'name', order: 'asc' },
-        });
+      const uploadsDir = path.join(process.cwd(), 'uploads');
+      await fs.mkdir(uploadsDir, { recursive: true });
+      const entries = await fs.readdir(uploadsDir, { withFileTypes: true });
+      const files = [];
 
-        if (error) throw error;
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const stats = await fs.stat(path.join(uploadsDir, entry.name));
+        const ext = path.extname(entry.name).toLowerCase();
+        const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'].includes(ext);
+        const isPdf = ext === '.pdf';
 
-        let files: any[] = [];
-        for (const item of data) {
-          const fullPath = folder ? `${folder}/${item.name}` : item.name;
-          
-          // In Supabase Storage API, folders typically don't have metadata or specific properties
-          // But they appear in the list. We check if it's a file by the presence of metadata.size 
-          // or if it's specifically marked as a folder in some client versions.
-          const isFolder = !item.id || !item.metadata;
-
-          if (isFolder && item.name !== '.emptyFolderPlaceholder') {
-            // It's a folder, recurse
-            const subFiles = await getAllFiles(bucket, fullPath);
-            files = [...files, ...subFiles];
-          } else if (item.id) {
-            // It's a file
-            const { data: { publicUrl } } = supabase.storage.from(bucket).getPublicUrl(fullPath);
-            files.push({
-              id: item.id,
-              title: item.name,
-              category: bucket === "Pics" ? 'Images' : 'PDFs',
-              size: item.metadata ? (item.metadata.size / (1024 * 1024)).toFixed(1) + ' MB' : '1.0 MB',
-              type: bucket === "Pics" ? 'image' : 'pdf',
-              downloadUrl: publicUrl,
-              thumbnail: bucket === "Pics" ? publicUrl : 'https://img.icons8.com/3d-fluency/188/pdf.png',
-              source: 'supabase',
-              path: fullPath
-            });
-          }
+        if (isImage || isPdf) {
+          const downloadUrl = `/uploads/${entry.name}`;
+          files.push({
+            id: entry.name,
+            title: entry.name,
+            category: isImage ? 'Images' : 'PDFs',
+            size: (stats.size / (1024 * 1024)).toFixed(1) + ' MB',
+            type: isImage ? 'image' : 'pdf',
+            downloadUrl: downloadUrl,
+            thumbnail: isImage ? downloadUrl : 'https://img.icons8.com/3d-fluency/188/pdf.png',
+            source: 'local',
+            path: entry.name
+          });
         }
-        return files;
       }
 
-      const [pdfFiles, picFiles] = await Promise.all([
-        getAllFiles("PDF's"),
-        getAllFiles("Pics")
-      ]);
-
-      res.json([...pdfFiles, ...picFiles]);
+      res.json(files);
     } catch (error: any) {
-      console.error('Supabase List Error:', error.message);
+      console.error('Local File List Error:', error.message);
       res.json([]);
     }
   });
@@ -412,43 +409,53 @@ async function startServer() {
     try {
       if (!drive) throw new Error('Drive not connected');
       
-      console.log('Starting migration from Drive to Supabase...');
+      const folderId = (req.query.folderId as string) || PARENT_FOLDER_ID;
+      console.log(`Starting recursive migration from Drive folder ${folderId} to local storage...`);
       
-      const response = await drive.files.list({
-        q: `'${PARENT_FOLDER_ID}' in parents and trashed = false and (mimeType = 'application/pdf' or mimeType contains 'image/')`,
-        fields: 'files(id, name, mimeType)',
-        pageSize: 1000,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true
-      });
+      async function getAllFilesRecursively(fId: string): Promise<any[]> {
+        let allFiles: any[] = [];
+        try {
+          const response = await drive.files.list({
+            q: `'${fId}' in parents and trashed = false`,
+            fields: 'files(id, name, mimeType)',
+            pageSize: 1000,
+            supportsAllDrives: true,
+            includeItemsFromAllDrives: true
+          });
+          
+          const items = response.data.files || [];
+          for (const item of items) {
+            if (item.mimeType === 'application/pdf' || item.mimeType?.startsWith('image/')) {
+              allFiles.push(item);
+            } else if (item.mimeType === 'application/vnd.google-apps.folder') {
+              const subFolderFiles = await getAllFilesRecursively(item.id);
+              allFiles = allFiles.concat(subFolderFiles);
+            }
+          }
+        } catch (err: any) {
+          console.error(`Error traversing folder ${fId}:`, err.message);
+        }
+        return allFiles;
+      }
 
-      const files = response.data.files || [];
+      const files = await getAllFilesRecursively(folderId);
       const results = [];
+      const uploadsDir = path.join(process.cwd(), 'uploads');
+      await fs.mkdir(uploadsDir, { recursive: true });
 
       for (const file of files) {
         try {
           console.log(`Migrating: ${file.name}`);
           
-          // Download from Drive
           const driveFile = await drive.files.get({
             fileId: file.id,
             alt: 'media'
           }, { responseType: 'arraybuffer' });
 
           const buffer = Buffer.from(driveFile.data as ArrayBuffer);
-          const isImage = file.mimeType?.startsWith('image/');
-          const bucketName = isImage ? "Pics" : "PDF's";
-
-          // Upload to Supabase
           const fileName = `${Date.now()}-${file.name}`;
-          const { error: uploadError } = await supabase.storage
-            .from(bucketName)
-            .upload(fileName, buffer, {
-              contentType: file.mimeType || 'application/octet-stream',
-              upsert: true
-            });
-
-          if (uploadError) throw uploadError;
+          const localPath = path.join(uploadsDir, fileName);
+          await fs.writeFile(localPath, buffer);
           
           results.push({ name: file.name, status: 'success' });
         } catch (err: any) {
@@ -460,6 +467,370 @@ async function startServer() {
       res.json({ success: true, processed: files.length, results });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Authorization Header Middleware
+  app.use((req: any, res, next) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const decoded = jwtVerify(token);
+      if (decoded) {
+        req.user = decoded;
+      }
+    }
+    next();
+  });
+
+  // Auth API Router
+  app.get('/api/auth/session', (req: any, res) => {
+    if (req.user) {
+      const token = jwtSign(req.user);
+      res.json({
+        session: {
+          access_token: token,
+          user: {
+            id: req.user.id,
+            email: req.user.email,
+            user_metadata: {
+              display_name: req.user.email.split('@')[0],
+              role: req.user.role
+            }
+          }
+        }
+      });
+    } else {
+      res.json({ session: null });
+    }
+  });
+
+  app.post('/api/auth/signin', async (req, res) => {
+    const { email, password } = req.body;
+    try {
+      const userResult = await turso.execute({
+        sql: 'SELECT * FROM users WHERE email = ?',
+        args: [email]
+      });
+
+      if (userResult.rows.length === 0) {
+        return res.status(400).json({ error: 'Invalid login credentials' });
+      }
+
+      const user = userResult.rows[0];
+      const hashed = hashPassword(password);
+      if (user.password_hash !== hashed) {
+        return res.status(400).json({ error: 'Invalid login credentials' });
+      }
+
+      const profileResult = await turso.execute({
+        sql: 'SELECT * FROM user_profiles WHERE id = ?',
+        args: [user.id]
+      });
+      const profile = profileResult.rows[0] || { id: user.id, email: user.email, name: email.split('@')[0], role: 'student' };
+
+      await turso.execute({
+        sql: 'UPDATE user_profiles SET last_login = ? WHERE id = ?',
+        args: [new Date().toISOString(), user.id]
+      });
+
+      const token = jwtSign({ id: user.id, email: user.email, role: profile.role });
+      const session = {
+        access_token: token,
+        user: {
+          id: user.id,
+          email: user.email,
+          user_metadata: {
+            display_name: profile.name,
+            role: profile.role
+          }
+        }
+      };
+      res.json({ session });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/auth/signup', async (req, res) => {
+    const { email, password, name, role } = req.body;
+    try {
+      const existing = await turso.execute({
+        sql: 'SELECT id FROM users WHERE email = ?',
+        args: [email]
+      });
+      if (existing.rows.length > 0) {
+        return res.status(400).json({ error: 'User already exists' });
+      }
+
+      const userId = crypto.randomUUID();
+      const pHash = hashPassword(password);
+
+      await turso.execute({
+        sql: 'INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)',
+        args: [userId, email, pHash]
+      });
+
+      await turso.execute({
+        sql: 'INSERT INTO user_profiles (id, email, name, role) VALUES (?, ?, ?, ?)',
+        args: [userId, email, name, role || 'student']
+      });
+
+      const token = jwtSign({ id: userId, email, role: role || 'student' });
+      const session = {
+        access_token: token,
+        user: {
+          id: userId,
+          email,
+          user_metadata: {
+            display_name: name,
+            role: role || 'student'
+          }
+        }
+      };
+      res.json({ session, user: session.user });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/auth/signout', (req, res) => {
+    res.json({ success: true });
+  });
+
+  app.post('/api/auth/reset-password', (req, res) => {
+    res.json({ success: true, message: 'Password reset email simulation successful.' });
+  });
+
+  app.post('/api/auth/admin/create-user', async (req: any, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized: Admin privileges required.' });
+    }
+    const { email, password, name, role } = req.body;
+    try {
+      const existing = await turso.execute({
+        sql: 'SELECT id FROM users WHERE email = ?',
+        args: [email]
+      });
+      if (existing.rows.length > 0) {
+        return res.status(400).json({ error: 'User already exists' });
+      }
+
+      const userId = crypto.randomUUID();
+      const pHash = hashPassword(password);
+
+      await turso.execute({
+        sql: 'INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)',
+        args: [userId, email, pHash]
+      });
+
+      await turso.execute({
+        sql: 'INSERT INTO user_profiles (id, email, name, role) VALUES (?, ?, ?, ?)',
+        args: [userId, email, name, role || 'student']
+      });
+
+      res.json({
+        user: {
+          id: userId,
+          email,
+          user_metadata: {
+            name,
+            role
+          }
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/auth/admin/delete-user', async (req: any, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Unauthorized: Admin privileges required.' });
+    }
+    const { id } = req.body;
+    try {
+      await turso.execute({
+        sql: 'DELETE FROM users WHERE id = ?',
+        args: [id]
+      });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // DB Direct Custom Queries Proxy Endpoint
+  app.post('/api/db-query', async (req: any, res) => {
+    const {
+      table,
+      method,
+      selectColumns,
+      bodyData,
+      filters,
+      orderColumn,
+      orderAscending,
+      limitCount,
+      isSingle,
+      isExactCount
+    } = req.body;
+
+    try {
+      let sql = '';
+      let args: any[] = [];
+
+      let whereClause = '';
+      const filterArgs: any[] = [];
+      if (filters && filters.length > 0) {
+        const clauses = filters.map((f: any) => {
+          if (f.op === 'eq') {
+            filterArgs.push(f.value);
+            return `"${f.field}" = ?`;
+          }
+          if (f.op === 'not_is') {
+            if (f.value === null) {
+              return `"${f.field}" IS NOT NULL`;
+            } else {
+              filterArgs.push(f.value);
+              return `"${f.field}" != ?`;
+            }
+          }
+          return '1=1';
+        });
+        whereClause = ' WHERE ' + clauses.join(' AND ');
+      }
+
+      if (method === 'select') {
+        if (isExactCount) {
+          sql = `SELECT COUNT(*) AS count FROM "${table}"` + whereClause;
+          args = [...filterArgs];
+          const countRes = await turso.execute({ sql, args });
+          const count = Number(countRes.rows[0]?.count || 0);
+          return res.json({ data: [], count, error: null });
+        }
+
+        sql = `SELECT ${selectColumns === '*' ? '*' : selectColumns} FROM "${table}"` + whereClause;
+        args = [...filterArgs];
+
+        if (orderColumn) {
+          sql += ` ORDER BY "${orderColumn}" ${orderAscending ? 'ASC' : 'DESC'}`;
+        }
+        if (limitCount !== null) {
+          sql += ` LIMIT ${limitCount}`;
+        }
+
+        const queryRes = await turso.execute({ sql, args });
+        let data = queryRes.rows.map(row => parseJSONFields(row));
+        if (isSingle) {
+          data = data[0] || null;
+        }
+        return res.json({ data, count: null, error: null });
+
+      } else if (method === 'insert') {
+        const items = Array.isArray(bodyData) ? bodyData : [bodyData];
+        const insertedRows = [];
+
+        for (const item of items) {
+          const keys = Object.keys(item);
+          const fields = keys.map(k => `"${k}"`).join(', ');
+          const placeholders = keys.map(() => '?').join(', ');
+          const insertSql = `INSERT INTO "${table}" (${fields}) VALUES (${placeholders})`;
+          const insertArgs = keys.map(k => {
+            if (typeof item[k] === 'object' && item[k] !== null) {
+              return JSON.stringify(item[k]);
+            }
+            return item[k];
+          });
+
+          await turso.execute({ sql: insertSql, args: insertArgs });
+
+          let selectSql = '';
+          let selectArgs: any[] = [];
+          if (item.id) {
+            selectSql = `SELECT * FROM "${table}" WHERE id = ?`;
+            selectArgs = [item.id];
+          } else if (item.user_id) {
+            selectSql = `SELECT * FROM "${table}" WHERE user_id = ?`;
+            selectArgs = [item.user_id];
+          } else {
+            selectSql = `SELECT * FROM "${table}" WHERE rowid = last_insert_rowid()`;
+          }
+
+          const selectRes = await turso.execute({ sql: selectSql, args: selectArgs });
+          if (selectRes.rows.length > 0) {
+            insertedRows.push(parseJSONFields(selectRes.rows[0]));
+          }
+        }
+
+        const data = Array.isArray(bodyData) ? insertedRows : (insertedRows[0] || null);
+        return res.json({ data, count: null, error: null });
+
+      } else if (method === 'update') {
+        const keys = Object.keys(bodyData);
+        const setClause = keys.map(k => `"${k}" = ?`).join(', ');
+        sql = `UPDATE "${table}" SET ${setClause}` + whereClause;
+        
+        const updateArgs = keys.map(k => {
+          if (typeof bodyData[k] === 'object' && bodyData[k] !== null) {
+            return JSON.stringify(bodyData[k]);
+          }
+          return bodyData[k];
+        });
+
+        args = [...updateArgs, ...filterArgs];
+        await turso.execute({ sql, args });
+
+        const selectSql = `SELECT * FROM "${table}"` + whereClause;
+        const selectRes = await turso.execute({ sql: selectSql, args: filterArgs });
+        let data = selectRes.rows.map(row => parseJSONFields(row));
+        if (isSingle) {
+          data = data[0] || null;
+        }
+        return res.json({ data, count: null, error: null });
+
+      } else if (method === 'delete') {
+        sql = `DELETE FROM "${table}"` + whereClause;
+        args = [...filterArgs];
+        await turso.execute({ sql, args });
+        return res.json({ data: null, count: null, error: null });
+      }
+
+      res.status(400).json({ error: `Method ${method} not handled.` });
+    } catch (err: any) {
+      console.error('Error executing query:', err);
+      res.status(500).json({ data: null, count: null, error: err.message });
+    }
+  });
+
+  // DB RPCS Endpoint
+  app.post('/api/db-rpc', async (req: any, res) => {
+    const { fnName, params } = req.body;
+    
+    if (fnName === 'log_admin_action') {
+      try {
+        const adminId = req.user?.id || 'demo-admin-001';
+        const logId = crypto.randomUUID();
+        await turso.execute({
+          sql: `INSERT INTO admin_logs (id, admin_id, action, target_type, target_id, old_values, new_values, ip_address, user_agent)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            logId,
+            adminId,
+            params.p_action,
+            params.p_target_type || null,
+            params.p_target_id || null,
+            params.p_old_values ? JSON.stringify(params.p_old_values) : null,
+            params.p_new_values ? JSON.stringify(params.p_new_values) : null,
+            req.ip || '127.0.0.1',
+            req.headers['user-agent'] || 'unknown'
+          ]
+        });
+        res.json({ data: null, error: null });
+      } catch (err: any) {
+        res.status(500).json({ data: null, error: err.message });
+      }
+    } else {
+      res.status(400).json({ error: `RPC function ${fnName} not supported.` });
     }
   });
 

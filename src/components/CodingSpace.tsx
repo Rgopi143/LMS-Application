@@ -251,6 +251,7 @@ export default function CodingSpace() {
       </div>
 
       <div className="flex-1 flex overflow-hidden">
+        {/* @ts-ignore */}
         <PanelGroup direction="horizontal">
           {/* Sidebar Panel */}
           <Panel defaultSize={20} minSize={15} collapsible>
@@ -271,6 +272,7 @@ export default function CodingSpace() {
 
           {/* Main Content Panel */}
           <Panel defaultSize={80}>
+            {/* @ts-ignore */}
             <PanelGroup direction="vertical">
               <Panel defaultSize={70}>
                 <div className="flex flex-col h-full bg-[#1e1e1e]">
