@@ -53,7 +53,13 @@ const notifyListeners = (event: string, session: any) => {
 // Periodically check session via API
 async function checkBackendSession() {
   try {
-    const res = await fetch('/api/auth/session');
+    const headers: HeadersInit = {};
+    if (currentSession?.access_token) {
+      headers['Authorization'] = `Bearer ${currentSession.access_token}`;
+    }
+    const res = await fetch('/api/auth/session', {
+      headers
+    });
     if (res.ok) {
       const data = await res.json();
       if (data.session) {
