@@ -363,7 +363,7 @@ async function startServer() {
   app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
       if (!drive) {
-        return res.status(503).json({ error: 'Google Drive is not connected.' });
+        throw new Error('Google Drive is not connected');
       }
       if (!req.file) {
         return res.status(400).json({ error: 'No file provided' });

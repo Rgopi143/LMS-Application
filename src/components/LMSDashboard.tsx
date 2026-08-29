@@ -1855,9 +1855,15 @@ Enable JPA repositories with @EnableJpaRepositories`,
   const getViewerUrl = (url: string) => {
     if (!url) return '';
 
-    // Direct load for Supabase or local files
+    // Direct load for Supabase or local files in development or if they start with slash
     if (url.includes('supabase.co') || url.startsWith('/')) {
       return url;
+    }
+
+    // Extract file ID from google drive proxy URL: /api/drive-proxy?id=... or https://.../api/drive-proxy?id=...
+    const driveProxyMatch = url.match(/drive-proxy\?id=([a-zA-Z0-9_-]+)/);
+    if (driveProxyMatch) {
+      return `https://docs.google.com/viewer?srcid=${driveProxyMatch[1]}&pid=explorer&efh=false&a=v&rel=0&hl=en_US&embedded=true`;
     }
 
     // If it's already a full Google Drive link, extract the ID and use the viewer format
@@ -1867,6 +1873,11 @@ Enable JPA repositories with @EnableJpaRepositories`,
         return `https://docs.google.com/viewer?srcid=${fileIdMatch[1]}&pid=explorer&efh=false&a=v&rel=0&hl=en_US&embedded=true`;
       }
       return url;
+    }
+
+    // If it's a production URL pointing to a PDF, we can use the Google Docs Viewer to avoid cross-origin iframe issues
+    if (url.startsWith('http') && !url.includes('localhost') && !url.includes('127.0.0.1') && url.toLowerCase().includes('.pdf')) {
+      return `https://docs.google.com/viewer?url=${encodeURIComponent(url)}&embedded=true`;
     }
 
     if (url.startsWith('http')) return url;
@@ -1882,6 +1893,7 @@ Enable JPA repositories with @EnableJpaRepositories`,
 
     return url.startsWith('/') ? url : `/${url}`;
   };
+
 
   return (
 
