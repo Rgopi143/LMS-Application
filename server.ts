@@ -264,7 +264,7 @@ async function startServer() {
     storage: multerStorage,
     limits: { fileSize: 200 * 1024 * 1024 } // 200 MB max
   });
-  const PARENT_FOLDER_ID = "1Oh-DFp1zf_MzCQdNSoHnmG-DhK-4x7qb";
+  const PARENT_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "116teUtLJhofUSfVsNzmWPDvzBsNkLFxZ";
   const UPLOADS_FOLDER_NAME = "Application Uploads";
 
   // Google Drive Authentication
@@ -368,6 +368,69 @@ async function startServer() {
     }
   });
 
+  let googleDriveFilesCache: any[] = [];
+  let lastCacheTime = 0;
+  const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes cache
+
+  async function getGoogleFilesCached(folderId: string): Promise<any[]> {
+    const now = Date.now();
+    if (googleDriveFilesCache.length > 0 && (now - lastCacheTime < CACHE_DURATION)) {
+      return googleDriveFilesCache;
+    }
+
+    if (!drive) return [];
+
+    console.log(`Fetching Google Drive files recursively for library cache from: ${folderId}`);
+    
+    async function getAllFilesRecursively(fId: string): Promise<any[]> {
+      let allFiles: any[] = [];
+      try {
+        const response = await drive.files.list({
+          q: `'${fId}' in parents and trashed = false`,
+          fields: 'files(id, name, mimeType, size, webViewLink)',
+          pageSize: 1000,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
+        });
+        
+        const items = response.data.files || [];
+        for (const item of items) {
+          if (item.mimeType === 'application/pdf' || item.mimeType?.startsWith('image/')) {
+            const sizeInMb = item.size ? (parseInt(item.size) / (1024 * 1024)).toFixed(1) + ' MB' : '0.0 MB';
+            const isImage = item.mimeType?.startsWith('image/');
+            allFiles.push({
+              id: item.id,
+              title: item.name,
+              category: isImage ? 'Images' : 'PDFs',
+              size: sizeInMb,
+              type: isImage ? 'image' : 'pdf',
+              downloadUrl: item.webViewLink || `https://drive.google.com/file/d/${item.id}/view`,
+              thumbnail: isImage ? (item.webViewLink || `https://drive.google.com/file/d/${item.id}/view`) : 'https://img.icons8.com/3d-fluency/188/pdf.png',
+              source: 'drive',
+              path: item.name
+            });
+          } else if (item.mimeType === 'application/vnd.google-apps.folder') {
+            const subFolderFiles = await getAllFilesRecursively(item.id);
+            allFiles = allFiles.concat(subFolderFiles);
+          }
+        }
+      } catch (err: any) {
+        console.error(`Cache fetch Error traversing folder ${fId}:`, err.message);
+      }
+      return allFiles;
+    }
+
+    try {
+      const fetched = await getAllFilesRecursively(folderId);
+      googleDriveFilesCache = fetched;
+      lastCacheTime = now;
+      return googleDriveFilesCache;
+    } catch (err: any) {
+      console.error('Error fetching/updating Google Drive cache:', err.message);
+      return googleDriveFilesCache;
+    }
+  }
+
   app.get('/api/supabase-files', async (req, res) => {
     try {
       const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -386,24 +449,29 @@ async function startServer() {
           const downloadUrl = `/uploads/${entry.name}`;
           files.push({
             id: entry.name,
-            title: entry.name,
+            title: entry.name.replace(/^\d+-/, ''),
             category: isImage ? 'Images' : 'PDFs',
             size: (stats.size / (1024 * 1024)).toFixed(1) + ' MB',
-            type: isImage ? 'image' : 'pdf',
-            downloadUrl: downloadUrl,
-            thumbnail: isImage ? downloadUrl : 'https://img.icons8.com/3d-fluency/188/pdf.png',
-            source: 'local',
-            path: entry.name
-          });
-        }
-      }
-
-      res.json(files);
-    } catch (error: any) {
-      console.error('Local File List Error:', error.message);
-      res.json([]);
-    }
-  });
+             type: isImage ? 'image' : 'pdf',
+             downloadUrl: downloadUrl,
+             thumbnail: isImage ? downloadUrl : 'https://img.icons8.com/3d-fluency/188/pdf.png',
+             source: 'local',
+             path: entry.name
+           });
+         }
+       }
+ 
+       if (drive) {
+         const driveFiles = await getGoogleFilesCached(PARENT_FOLDER_ID);
+         files.push(...driveFiles);
+       }
+ 
+       res.json(files);
+     } catch (error: any) {
+       console.error('Local File List Error:', error.message);
+       res.json([]);
+     }
+   });
 
   app.get('/api/migrate-drive-to-supabase', async (req, res) => {
     try {
