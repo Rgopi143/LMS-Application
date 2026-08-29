@@ -415,8 +415,8 @@ async function startServer() {
               category: isImage ? 'Images' : 'PDFs',
               size: sizeInMb,
               type: isImage ? 'image' : 'pdf',
-              downloadUrl: item.webViewLink || `https://drive.google.com/file/d/${item.id}/view`,
-              thumbnail: isImage ? (item.webViewLink || `https://drive.google.com/file/d/${item.id}/view`) : 'https://img.icons8.com/3d-fluency/188/pdf.png',
+              downloadUrl: `/api/drive-proxy?id=${item.id}`,
+              thumbnail: isImage ? `/api/drive-proxy?id=${item.id}` : 'https://img.icons8.com/3d-fluency/188/pdf.png',
               source: 'drive',
               path: item.name
             });
@@ -484,6 +484,29 @@ async function startServer() {
       res.json(results);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/drive-proxy', async (req, res) => {
+    try {
+      const fileId = req.query.id as string;
+      if (!fileId) return res.status(400).send('Missing file id');
+      if (!drive) return res.status(500).send('Google Drive not initialized');
+
+      const response = await drive.files.get({
+        fileId: fileId,
+        alt: 'media'
+      }, { responseType: 'stream' });
+
+      const contentType = response.headers['content-type'];
+      if (contentType) {
+        res.setHeader('content-type', contentType);
+      }
+
+      response.data.pipe(res);
+    } catch (err: any) {
+      console.error('Drive proxy error:', err.message);
+      res.status(500).send(err.message);
     }
   });
 
