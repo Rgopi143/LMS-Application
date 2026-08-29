@@ -15,9 +15,7 @@ let currentSession: any = (() => {
           while (base64.length % 4) {
             base64 += '=';
           }
-          const jsonStr = typeof window !== 'undefined'
-            ? window.atob(base64)
-            : Buffer.from(base64Url, 'base64url').toString('utf8');
+          const jsonStr = window.atob(base64);
           const payload = JSON.parse(jsonStr);
           if (payload.exp && Date.now() > payload.exp) {
             localStorage.removeItem('lms_session');

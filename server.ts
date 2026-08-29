@@ -78,7 +78,45 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
-  app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+  app.use('/uploads/:filename', async (req, res, next) => {
+    const filename = req.params.filename;
+    const localPath = path.join(process.cwd(), 'uploads', filename);
+
+    try {
+      await fs.access(localPath);
+      return res.sendFile(localPath);
+    } catch {
+      if (!drive) {
+        return res.status(404).send('File not found locally and Google Drive is not initialized');
+      }
+
+      try {
+        console.log(`File ${filename} not found locally. Searching Google Drive fallback...`);
+        const cleanName = filename.replace(/^\d+-/, '');
+        const driveFiles = await getGoogleFilesCached(PARENT_FOLDER_ID);
+        const match = driveFiles.find((f: any) => f.path === cleanName || f.title === cleanName);
+
+        if (match) {
+          console.log(`Found matching file on Google Drive: ${match.title} (${match.id}). Streaming...`);
+          const driveResponse = await drive.files.get({
+            fileId: match.id,
+            alt: 'media'
+          }, { responseType: 'stream' });
+
+          const contentType = driveResponse.headers['content-type'];
+          if (contentType) {
+            res.setHeader('content-type', contentType);
+          }
+          return driveResponse.data.pipe(res);
+        } else {
+          return res.status(404).send('File not found locally or in Google Drive');
+        }
+      } catch (err: any) {
+        console.error('Local file fallback streaming error:', err.message);
+        return res.status(500).send(err.message);
+      }
+    }
+  });
   // MongoDB Connection
   const mongoUri = process.env.MONGODB_URI;
   let db: any;
